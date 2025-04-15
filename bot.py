@@ -9,6 +9,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from config import BOT_TOKEN
 
 # Enable logging
 logging.basicConfig(
@@ -123,8 +124,7 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 def main():
     """Run the bot."""
-    # Replace 'YOUR_BOT_TOKEN' with your actual Telegram bot token.
-    app = Application.builder().token("YOUR_BOT_TOKEN").build()
+    app = Application.builder().token(BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
