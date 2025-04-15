@@ -94,18 +94,18 @@ async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
         # Send confirmation message in bold (using Markdown)
         await update.message.reply_text(
-            f"**📥 Episode {episode} Added...!**", parse_mode="Markdown"
+            f"<b>📥 Episode {episode} Added...!</b>", parse_mode="HTML"
         )
 
         # Repost videos with captions in bold text.
         # The caption now uses bold formatting and changes '@Rear_Animes' to '[@Rear_Animes]'.
         for idx, file_id in enumerate(context.user_data.get("videos", [])):
             quality = QUALITIES[idx] if idx < len(QUALITIES) else "Unknown"
-            caption = f"**[@Rear_Animes] {title} S{season}E{episode} - {quality}**"
+            caption = f"<b>[@Rear_Animes] {title} S{season}E{episode} - {quality}</b>"
             await update.message.reply_video(
                 video=file_id,
                 caption=caption,
-                parse_mode="Markdown",
+                parse_mode="HTML",
             )
 
         context.user_data.clear()
