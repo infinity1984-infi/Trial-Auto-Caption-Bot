@@ -1,6 +1,6 @@
 import logging
 import re
-from telegram import Update
+from telegram import Update, Sticker
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -9,115 +9,183 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from config import BOT_TOKEN
+from config import BOT_TOKEN, DEFAULT_QUALITIES, DEFAULT_CAPTION
 
-# Logging setup
+# Enable logging
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# States
-WAIT_FOR_VIDEOS, WAIT_FOR_DETAILS = range(2)
+# Conversation states
+(
+    WAIT_SET_STICKER,
+    MODE_SELECTION,
+    WAIT_SEASON_COUNT,
+    WAIT_VIDEOS,
+    WAIT_DETAILS,
+) = range(5)
 
-# Accepted video MIME types
-ACCEPTED_MIME_TYPES = [
-    "video/mp4", "video/quicktime", "video/x-msvideo", "video/x-matroska",
-    "video/webm", "video/x-flv", "video/3gpp", "video/ogg", "application/octet-stream"
-]
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Greets and prompts mode selection."""
+    await update.message.reply_text(
+        "Bot is Alive!\n"
+        "/setsticker – Register a sticker (reply to a sticker)\n"
+        "/forepisode – Process 3 videos for a single episode\n"
+        "/forseason – Process multiple episodes (3 videos each)"
+    )
+    return MODE_SELECTION
 
-# Video qualities
-QUALITIES = ["480p", "720p", "1080p"]
+async def set_sticker_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Registers a sticker for later use."""
+    if not update.message.reply_to_message or not update.message.reply_to_message.sticker:
+        await update.message.reply_text(
+            "❌ Please reply to a sticker with /setsticker."
+        )
+        return WAIT_SET_STICKER
+    sticker: Sticker = update.message.reply_to_message.sticker
+    context.chat_data["sticker_id"] = sticker.file_id
+    await update.message.reply_text("✅ Sticker registered!")
+    return ConversationHandler.END
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("👋 Send the 3 video files one by one (480p, 720p, 1080p).")
+async def forepisode_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates single episode flow."""
+    context.chat_data["mode"] = "EPISODE"
     context.user_data.clear()
-    return WAIT_FOR_VIDEOS
+    await update.message.reply_text("📥 Send exactly 3 video files.")
+    return WAIT_VIDEOS
 
-async def receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def forseason_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initiates full season flow."""
+    context.chat_data["mode"] = "SEASON"
+    await update.message.reply_text("🔢 How many episodes in this season?")
+    return WAIT_SEASON_COUNT
+
+async def receive_season_count(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stores total episode count for /forseason."""
+    text = update.message.text.strip()
+    if not text.isdigit() or int(text) < 1:
+        await update.message.reply_text("❌ Send a positive integer.")
+        return WAIT_SEASON_COUNT
+    total = int(text)
+    context.chat_data["season_count"] = total
+    context.chat_data["current_ep"] = 1
+    await update.message.reply_text(
+        f"✅ Season has {total} episodes. Now send {total*3} videos."
+    )
+    return WAIT_VIDEOS
+
+async def receive_videos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Collects uploaded videos until expected count reached."""
     video = update.message.video or update.message.document
-    if not video or video.mime_type not in ACCEPTED_MIME_TYPES:
-        await update.message.reply_text("❌ Invalid file. Please send a valid video format.")
-        return WAIT_FOR_VIDEOS
-
+    if not video or video.mime_type.split("/")[0] != "video":
+        await update.message.reply_text("❌ Please send a video file.")
+        return WAIT_VIDEOS
     context.user_data.setdefault("videos", []).append(video.file_id)
     count = len(context.user_data["videos"])
-    await update.message.reply_text(f"✅ Received {count}/3 video(s).")
-
-    if count == 3:
+    await update.message.reply_text(f"✅ Received {count} video(s).")
+    # Determine expected total
+    if context.chat_data["mode"] == "EPISODE":
+        needed = 3
+    else:
+        needed = context.chat_data["season_count"] * 3
+    if count >= needed:
         await update.message.reply_text(
-            "📝 Now send the details in 2 or 3 lines:\n"
-            "1. Title (e.g., Attack on Titan)\n"
-            "2. Season or Episode (e.g., S01 or E05 or S01E05)\n"
-            "3. (Optional) Episode if not included above."
+            "📝 Now send details:\n1. Title\n2. Season (e.g., 01 or S01)"
         )
-        return WAIT_FOR_DETAILS
+        return WAIT_DETAILS
+    return WAIT_VIDEOS
 
-    return WAIT_FOR_VIDEOS
-
-async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Parses details and dispatches videos with captions and sticker."""
     try:
         lines = update.message.text.strip().splitlines()
-        if not lines:
-            raise ValueError("Title is required.")
-
+        if len(lines) < 2:
+            raise ValueError("Title and Season are required.")
         title = lines[0].strip()
-        season, episode = "01", "01"
+        season_raw = lines[1].strip()
+        season = re.sub(r"\D", "", season_raw).zfill(2)
+        qualities = context.chat_data.get("qualities", DEFAULT_QUALITIES)
+        sticker_id = context.chat_data.get("sticker_id")
+        videos = context.user_data["videos"]
 
-        if len(lines) >= 2:
-            match = re.search(r"[sS]?(\d{1,2})[eE]?(\d{1,2})?", lines[1])
-            if match:
-                season = match.group(1).zfill(2)
-                if match.group(2):
-                    episode = match.group(2).zfill(2)
+        if context.chat_data["mode"] == "SEASON":
+            total = context.chat_data["season_count"]
+            ep = context.chat_data["current_ep"]
+            for batch_start in range(0, total * 3, 3):
+                for i in range(3):
+                    idx = batch_start + i
+                    quality = qualities[i] if i < len(qualities) else qualities[-1]
+                    caption = DEFAULT_CAPTION.format(
+                        title=title, season=season, episode=str(ep).zfill(2), quality=quality
+                    )
+                    await update.message.reply_video(
+                        video=videos[idx], caption=caption, parse_mode="HTML"
+                    )
+                if sticker_id:
+                    await update.message.reply_sticker(sticker=sticker_id)
+                context.chat_data["current_ep"] += 1
+                ep += 1
+        else:
+            # Expect exactly 3 videos
+            episode = "01"
+            if len(lines) > 2:
+                ep_raw = lines[2].strip()
+                ep_num = re.sub(r"\D", "", ep_raw)
+                if ep_num:
+                    episode = ep_num.zfill(2)
+            for i in range(3):
+                quality = qualities[i] if i < len(qualities) else qualities[-1]
+                caption = DEFAULT_CAPTION.format(
+                    title=title, season=season, episode=episode, quality=quality
+                )
+                await update.message.reply_video(
+                    video=videos[i], caption=caption, parse_mode="HTML"
+                )
+            if sticker_id:
+                await update.message.reply_sticker(sticker=sticker_id)
 
-        if len(lines) == 3:
-            ep_line = re.sub(r"\D", "", lines[2])
-            if ep_line:
-                episode = ep_line.zfill(2)
-
-        # Respond with success message
-        await update.message.reply_text(
-            f"<b>📥 {title} S{season}E{episode} Uploaded Successfully!</b>",
-            parse_mode="HTML"
-        )
-
-        # Resend each video with correct caption
-        for idx, file_id in enumerate(context.user_data["videos"]):
-            quality = QUALITIES[idx] if idx < len(QUALITIES) else "Unknown"
-            caption = f"<b>[@Rear_Animes] {title} S{season}E{episode} - {quality}</b>"
-            await update.message.reply_video(
-                video=file_id,
-                caption=caption,
-                parse_mode="HTML"
+        # Final main-channel broadcast
+        for _ in range(3):
+            await update.message.reply_text(
+                "<b>Main channel : [ @INFI1984 ]</b>", parse_mode="HTML"
             )
-
-        context.user_data.clear()
         return ConversationHandler.END
 
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}\nPlease resend the details properly.")
-        return WAIT_FOR_DETAILS
+        logger.error("receive_details error: %s", e)
+        await update.message.reply_text(
+            f"❌ Error: {e}\nPlease restart with /start."
+        )
+        return ConversationHandler.END
 
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("🚫 Cancelled. To start again, use /start.")
-    context.user_data.clear()
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Cancels the conversation."""
+    await update.message.reply_text("🚫 Cancelled. Use /start to try again.")
     return ConversationHandler.END
 
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
-
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
+    conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("start", start_cmd),
+            CommandHandler("setsticker", set_sticker_cmd),
+            CommandHandler("forepisode", forepisode_start),
+            CommandHandler("forseason", forseason_start),
+        ],
         states={
-            WAIT_FOR_VIDEOS: [MessageHandler(filters.VIDEO | filters.Document.VIDEO, receive_video)],
-            WAIT_FOR_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
+            WAIT_SET_STICKER: [MessageHandler(filters.STICKER, set_sticker_cmd)],
+            MODE_SELECTION: [MessageHandler(filters.Regex("^/forepisode$"), forepisode_start),
+                             MessageHandler(filters.Regex("^/forseason$"), forseason_start)],
+            WAIT_SEASON_COUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_season_count)],
+            WAIT_VIDEOS: [MessageHandler(filters.VIDEO | filters.Document.VIDEO, receive_videos)],
+            WAIT_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_details)],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
+        allow_reentry=True,
     )
-
-    app.add_handler(conv_handler)
-    logger.info("Bot is running...")
+    app.add_handler(conv)
+    logger.info("Bot started")
     app.run_polling()
 
 if __name__ == "__main__":
