@@ -141,9 +141,9 @@ async def receive_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await send_batch(ep, vids[start:start+3])
 
         # Final broadcast
-        for _ in range(3):
+        for _ in range(1):
             await update.message.reply_text(
-                "<b>Main channel : [ @INFI1984 ]</b>", parse_mode="HTML"
+                "<b>Main channel : [ @INFI1984 ]</b>\n<b>Main channel : [ @INFI1984 ]</b>\n<b>Main channel : [ @INFI1984 ]</b>", parse_mode="HTML"
             )
         return ConversationHandler.END
 
